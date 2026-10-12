@@ -5,10 +5,14 @@
 LOG_MODULE_REGISTER(homework, LOG_LEVEL_INF);
 
 #define STACK_SIZE            2048
+/* Control must start within 10 ms. Maintenance has no deadline, so it
+ * must not outrank control. A lower number is a higher priority.
+ */
 #define CONTROL_PRIORITY         7
-#define MAINTENANCE_PRIORITY     4
+#define MAINTENANCE_PRIORITY     8
 #define EVENT_PERIOD_MS        250
 #define MAINTENANCE_LOAD_US  45000
+#define DEADLINE_MS             10
 
 struct control_event {
     uint32_t seq;
@@ -17,6 +21,8 @@ struct control_event {
 
 K_MSGQ_DEFINE(control_queue, sizeof(struct control_event), 4, 4);
 K_SEM_DEFINE(maintenance_start, 0, 1);
+
+static uint32_t deadline_misses;
 
 /* ================================================================== */
 /*  Timer expiry: creates one control event                           */
@@ -42,7 +48,8 @@ static void event_timer_expiry(struct k_timer *timer)
     /* Both threads become ready when the timer interrupt returns. */
     k_sem_give(&maintenance_start);
 
-    /* TODO: Add an application trace event for this sequence. */
+    sys_trace_named_event("event_ready", event.seq,
+                          k_msgq_num_used_get(&control_queue));
 }
 
 K_TIMER_DEFINE(event_timer, event_timer_expiry, NULL);
@@ -64,12 +71,21 @@ static void control_fn(void *p1, void *p2, void *p3)
             continue;
         }
 
-        LOG_INF("[CONTROL] processed seq=%u", event.seq);
+        uint32_t latency_ms = k_uptime_get_32() - event.ready_ms;
+        uint32_t queue = k_msgq_num_used_get(&control_queue);
 
-        /* TODO: Define a response-time guarantee. */
-        /* TODO: Measure latency and count every deadline miss. */
-        /* TODO: Rate-limit repeated warning messages. */
-        /* TODO: Add an application trace event for completion. */
+        LOG_INF("event_ready seq=%u queue=%u", event.seq, queue);
+
+        /* Guarantee: control work starts within DEADLINE_MS of event_ready. */
+        if (latency_ms > DEADLINE_MS) {
+            deadline_misses++;
+            LOG_WRN_RATELIMIT("deadline_miss count=%u seq=%u latency_ms=%u",
+                              deadline_misses, event.seq, latency_ms);
+        }
+
+        LOG_INF("event_done seq=%u latency_ms=%u result=%d",
+                event.seq, latency_ms, 0);
+        sys_trace_named_event("event_done", event.seq, latency_ms);
     }
 }
 
